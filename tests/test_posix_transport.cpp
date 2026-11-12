@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: MIT
+// Exercise the production POSIX backend, not the register simulator.
+#include <HiwonderBus/HiwonderBus.hpp>
+
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <fcntl.h>
+#include <pthread.h>
+#include <unistd.h>
+
+using namespace HiwonderBus;
+using Clock = std::chrono::steady_clock;
+
+void require(bool ok, const char* message) {
+  if (!ok) throw std::runtime_error(message);
+}
+
+struct Pty {
+  int master = -1;
+  std::string slave;
+  Pty() {
+    master = ::posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    require(master >= 0, "posix_openpt failed");
+    require(::grantpt(master) == 0 && ::unlockpt(master) == 0, "PTY setup failed");
+    const char* name = ::ptsname(master);
+    require(name != nullptr, "ptsname failed");
+    slave = name;
+  }
+  ~Pty() { if (master >= 0) ::close(master); }
+};
+
+void onSignal(int) {}
+
+int main() {
+  try {
+    std::cout << "opening PTY" << std::endl;
+    Pty pty;
+    BusConfig config(pty.slave);
+    config.exclusive = false;
+    config.enable_low_latency = false;
+    config.write_timeout_ms = 20;
+    config.read_timeout_ms = 40;
+    config.error_mode = ErrorMode::kNonThrowing;
+    SerialBus bus(config);
+    require(bus.open(pty.slave), "bus open failed");
+    std::cout << "PTY opened" << std::endl;
+
+    // No reader on the master: fill the tty queue. Before the fix a blocking
+    // write never returned, despite the configured 20ms budget (CTest kills
+    // this executable after 10s as a regression safety net).
+    const Packet full = Packet::make(1, Command::kMove, std::vector<std::uint8_t>(252, 0));
+    const std::vector<Packet> large(1000, full);
+    std::cout << "large batch prepared" << std::endl;
+    const auto start = Clock::now();
+    ErrorCode code = ErrorCode::kOk;
+    require(bus.tryWriteFrames(large, &code) == 0, "oversized PTY write unexpectedly completed");
+    const auto elapsed = Clock::now() - start;
+    require(code == ErrorCode::kTimeout, "incomplete write must report timeout");
+    require(elapsed < std::chrono::seconds(1), "write exceeded its bounded deadline");
+    require(bus.lastErrorCode() == code && !bus.lastError().empty(), "missing write diagnostic");
+    require(bus.stats().tx_bytes > 0, "partial TX bytes were not counted");
+
+    std::cout << "bounded partial write passed" << std::endl;
+
+    // Recover the same bus, proving the failed operation released its mutex.
+    bus.flushOutput();
+    char drain[4096];
+    while (::read(pty.master, drain, sizeof(drain)) > 0) {}
+    require(bus.tryWrite(Packet::makeRead(1, Command::kReadTemp), &code), "write recovery failed");
+    require(bus.lastErrorCode() == ErrorCode::kOk && bus.lastError().empty(), "stale error after recovery");
+    while (::read(pty.master, drain, sizeof(drain)) > 0) {}
+
+    std::cout << "write recovery passed" << std::endl;
+
+    // Repeated EINTR must not restart the timeout budget.
+    struct sigaction action{};
+    action.sa_handler = onSignal;
+    ::sigemptyset(&action.sa_mask);
+    struct sigaction old{};
+    require(::sigaction(SIGUSR1, &action, &old) == 0, "sigaction failed");
+    const pthread_t caller = ::pthread_self();
+    std::atomic<bool> done{false};
+    std::thread signals([&] {
+      while (!done.load()) {
+        ::pthread_kill(caller, SIGUSR1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+    Response reply;
+    const auto read_start = Clock::now();
+    const bool answered = bus.tryTransact(Packet::makeRead(1, Command::kReadTemp), &reply, 1, 40, &code);
+    const auto read_elapsed = Clock::now() - read_start;
+    done = true;
+    signals.join();
+    ::sigaction(SIGUSR1, &old, nullptr);
+    require(!answered && code == ErrorCode::kTimeout, "silent PTY should time out");
+    require(read_elapsed >= std::chrono::milliseconds(20) &&
+            read_elapsed < std::chrono::milliseconds(500), "EINTR changed read budget");
+
+    std::cout << "signal-interrupted read deadline passed" << std::endl;
+
+    // A responder emits independently specified wire bytes one at a time,
+    // with a delayed unrelated reply before the requested signed position.
+    while (::read(pty.master, drain, sizeof(drain)) > 0) {}
+    std::thread responder([&] {
+      char request[6];
+      std::size_t received = 0;
+      const auto end = Clock::now() + std::chrono::seconds(1);
+      while (received < sizeof(request) && Clock::now() < end) {
+        const auto n = ::read(pty.master, request + received, sizeof(request) - received);
+        if (n > 0) received += static_cast<std::size_t>(n);
+        else std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      // ID2/VIN=7000 followed by ID1/POS=-100 ticks. Checksums are literal,
+      // not generated by the SDK's packet builder/parser under test.
+      const unsigned char bytes[] = {0x55,0x55,2,5,27,0x58,0x1b,0x6a,
+                                     0x55,0x55,1,5,28,0x9c,0xff,0x42};
+      for (const auto byte : bytes) {
+        if (::write(pty.master, &byte, 1) != 1) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+    const bool ok = bus.tryTransact(Packet::makeRead(1, Command::kReadPhysicalAngle), &reply, 2, 100, &code);
+    responder.join();
+    require(ok && code == ErrorCode::kOk, "fragmented correlated reply failed");
+    require(reply.id == 1 && reply.command == 28 && reply.rawAngle() == -100,
+            "wrong PTY reply accepted");
+    std::cout << "POSIX PTY deadline, partial-write, EINTR, fragmentation and correlation tests passed\n";
+  } catch (const std::exception& e) {
+    std::cerr << e.what() << '\n';
+    return 1;
+  }
+}

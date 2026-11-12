@@ -66,3 +66,27 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Built extension inside the source tree (editable builds, local experiments)
+python/hiwonder_bus/_hiwonder_bus*.so
+python/hiwonder_bus/*.pyd
+
+# Packaging
+dist/
+sdist/
+wheelhouse/
+*.egg-info/
+*.whl
+
+# scikit-build-core scratch
+.cmake/

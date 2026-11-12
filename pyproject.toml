@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: MIT
+#
+# Python packaging for hiwonder-servo-classic-sdk.
+#
+#   pip install -e .            # editable, builds the C++ extension in place
+#   pip wheel . --no-deps       # build a wheel
+#
+# The build is driven by scikit-build-core, which delegates to the root
+# CMakeLists.txt (target `_hiwonder_bus`). Pure-Python packages are copied from
+# python/, so a single source of truth stays in CMake for the native part.
+#
+[build-system]
+requires = ["scikit-build-core>=0.8", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "hiwonder-servo-classic"
+version = "0.1.0"
+description = "Linux C++17 + pybind11 SDK for the Hiwonder/LewanSoul classic serial bus servo family"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Winston Chou" }]
+keywords = [
+  "hiwonder",
+  "lewan-soul",
+  "lx-16a",
+  "lx16a",
+  "servo",
+  "robotics",
+  "biped",
+  "serial",
+  "uart",
+  "pybind11",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: C++",
+  "Programming Language :: C++17",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Home Automation",
+  "Topic :: Scientific/Engineering :: Human Machine Interfaces",
+  "Topic :: System :: Hardware :: Hardware Drivers",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/hiwonder-servo-classic/hiwonder-servo-classic-sdk"
+Documentation = "https://github.com/hiwonder-servo-classic/hiwonder-servo-classic-sdk#readme"
+Source = "https://github.com/hiwonder-servo-classic/hiwonder-servo-classic-sdk"
+Issues = "https://github.com/hiwonder-servo-classic/hiwonder-servo-classic-sdk/issues"
+
+# ---------------------------------------------------------------------------
+# scikit-build-core
+# ---------------------------------------------------------------------------
+# The schema here targets scikit-build-core >= 0.8 (tested against 1.1).
+# Root CMakeLists.txt owns the native build; this section only points at it
+# and declares what goes into the wheel.
+[tool.scikit-build]
+cmake.version = ">=3.16"
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+minimum-version = "0.8"
+
+# The wheel carries two pure-Python packages plus the compiled extension that
+# CMake installs into hiwonder_bus/.
+[tool.scikit-build.wheel]
+packages = ["python/hiwonder_bus", "python/pylx16a"]
+
+[tool.scikit-build.sdist]
+exclude = [".git", "build", "dist", "docs", "*.egg-info"]
+
+[tool.scikit-build.cmake.define]
+BUILD_PYTHON_BINDINGS = "ON"
+BUILD_EXAMPLES = "OFF"
+BUILD_TESTS = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 95
+target-version = "py39"
